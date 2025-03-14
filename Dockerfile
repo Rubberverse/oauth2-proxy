@@ -1,18 +1,10 @@
-# The image ARGs have to be at the top, otherwise the docker daemon cannot validate
-# the FROM statements and overall Dockerfile
-#
-# Argument for setting the build image
-ARG BUILD_IMAGE=placeholder
-# Argument for setting the runtime image
-ARG RUNTIME_IMAGE=placeholder
-# Argument for setting the oauth2-proxy build version
 ARG VERSION
 
 # All builds should be done using the platform native to the build node to allow
 #  cache sharing of the go mod download step.
 # Go cross compilation is also faster than emulation the go compilation across
 #  multiple platforms.
-FROM --platform=${BUILDPLATFORM} ${BUILD_IMAGE} AS builder
+FROM --platform=${BUILDPLATFORM} docker.io/library/golang:1.22-bookworm AS builder
 
 # Copy sources
 WORKDIR $GOPATH/src/github.com/oauth2-proxy/oauth2-proxy
@@ -24,12 +16,10 @@ RUN go mod download
 # Now pull in our code
 COPY . .
 
-# Arguments go here so that the previous steps can be cached if no external sources
-# have changed. These arguments are automatically set by the docker engine.
+# Arguments go here so that the previous steps can be cached if no external
+#  sources have changed.
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
-
-# Reload version argument
 ARG VERSION
 
 # Build binary and make sure there is at least an empty key file.
@@ -53,14 +43,30 @@ RUN case ${TARGETPLATFORM} in \
     printf "Building OAuth2 Proxy for arch ${GOARCH}\n" && \
     GOARCH=${GOARCH} VERSION=${VERSION} make build && touch jwt_signing_key.pem
 
-# Reload runtime image
-ARG RUNTIME_IMAGE
 # Copy binary to runtime image
-FROM ${RUNTIME_IMAGE}
-# Reload version
+FROM alpine:edge
 ARG VERSION
+ARG CONT_USER=oauth2-proxy \
+    CONT_UID=1001
 
-COPY --from=builder /go/src/github.com/oauth2-proxy/oauth2-proxy/oauth2-proxy /bin/oauth2-proxy
+WORKDIR /app
+RUN apk update \
+    && apk upgrade \
+    && rm -rf /var/cache/apk \
+    && addgroup \
+        --system \
+        --gid ${CONT_UID} \
+        ${CONT_USER} \
+    && adduser \
+        --home "/app" \
+        --shell "/bin/false" \
+        --uid ${CONT_UID}  \
+        --ingroup ${CONT_USER} \
+        --disabled-password \
+        --no-create-home \
+        ${CONT_USER}
+
+COPY --from=builder /go/src/github.com/oauth2-proxy/oauth2-proxy/oauth2-proxy /app/bin/oauth2-proxy
 COPY --from=builder /go/src/github.com/oauth2-proxy/oauth2-proxy/jwt_signing_key.pem /etc/ssl/private/jwt_signing_key.pem
 
 LABEL org.opencontainers.image.licenses=MIT \
@@ -71,4 +77,5 @@ LABEL org.opencontainers.image.licenses=MIT \
       org.opencontainers.image.title=oauth2-proxy \
       org.opencontainers.image.version=${VERSION}
 
-ENTRYPOINT ["/bin/oauth2-proxy"]
+USER ${CONT_USER}
+ENTRYPOINT ["/app/bin/oauth2-proxy"]
